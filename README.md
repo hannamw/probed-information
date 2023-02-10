@@ -10,6 +10,6 @@ python run_vinfo.py --model_name bert-base-cased --batch_size 16
 python run_vinfo.py --model_name bert-base-cased --batch_size 16 --unmasked
 python analysis_and_plots.py --model_name bert-base-cased
 ```
-The packages needed to install this package can be installed together as a conda environement, using the `environment.yml` file.
+The packages needed to install this package can be installed together as a conda environment, using the `environment.yml` file.
 
 Feel free to email me (m.w.hanna@uva.nl) with any questions!

@@ -1,4 +1,3 @@
-#%%
 import math
 from pathlib import Path
 import argparse
@@ -18,10 +17,10 @@ parser = argparse.ArgumentParser()
 parser.add_argument('--model_name', type=str, default='bert-base-cased')
 parser.add_argument('--batch_size', type=int, default=8)
 parser.add_argument('--probe_runs', type=int, default=1)
-parser.add_argument('--epochs', type=int, default=40)
+parser.add_argument('--unmasked', action='store_true')
 args = parser.parse_args()
 
-#%%
+
 device = "cuda" if torch.cuda.is_available() else "cpu"
 # pl_accelerator = "gpu" if device == 'cuda' else device 
 # n_devices = torch.cuda.device_count() if pl_accelerator == 'gpu' else 1
@@ -35,7 +34,10 @@ train, _, _ = get_reps(args.model_name, batch_size=args.batch_size)
 minimum_dataset_size = min(len(train_ds) for train_ds in train)
 percents = [0.1, 0.2, 0.4, 0.8, 1.6, 3.2, 6.25, 12.5, 25, 50, 100]
 train_ends = [math.floor(0.01 * percent * minimum_dataset_size) for percent in percents]
-# print("training examples per percent:", train_ends)
+if args.unmasked:
+    train, _, _ = get_reps(args.model_name, batch_size=args.batch_size, masked=False)
+    for i, train_ds in enumerate(train):
+        assert len(train_ds) >= train_ends[-1], f"Dataset {i} too short: should be {train_ends[-1]}, but is {len(train_ds)}"
 
 # results_array: trials x words x layers x percents
 train_accs_array = torch.zeros([args.probe_runs, WORDS_IN_SENTENCE, n_layers, len(percents) - 1])
@@ -99,14 +101,19 @@ with tqdm(total=args.probe_runs * WORDS_IN_SENTENCE * n_layers * (len(train_ends
 
                     pbar.update(1)
 
-results_path = Path(f'results/{args.model_name}')
-results_path.mkdir(exist_ok=True, parents=True)
-torch.save(ns_esums_array, results_path/'esums_array.pt')
 # Computing the actual description length. There are 2 labels, and 4 in the first segment
 # Thus, full_cost_of_first_segment should be 4
 n_labels = 2
 full_cost_of_first_segment = torch.log2(torch.tensor(n_labels)) * train_ends[0]
 description_lengths = full_cost_of_first_segment + ns_esums_array.sum(dim=-1)
 
-torch.save(train_accs_array, results_path/'mdl_accuracy.pt')
-torch.save(description_lengths, results_path/'description_length.pt')
+results_path = Path(f'results/{args.model_name}')
+results_path.mkdir(exist_ok=True, parents=True)
+if args.unmasked:
+    torch.save(ns_esums_array, results_path/'esums_array_unmasked.pt')
+    torch.save(train_accs_array, results_path/'mdl_accuracy_unmasked.pt')
+    torch.save(description_lengths, results_path/'description_length_unmasked.pt')
+else:
+    torch.save(ns_esums_array, results_path/'esums_array.pt')
+    torch.save(train_accs_array, results_path/'mdl_accuracy.pt')
+    torch.save(description_lengths, results_path/'description_length.pt')

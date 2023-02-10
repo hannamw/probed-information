@@ -6,8 +6,10 @@ import torch.nn.functional as F
 from torch.utils.data import DataLoader, Dataset
 import torchmetrics
 import pytorch_lightning as pl
+from tqdm import tqdm
 from einops import rearrange
 from transformers import AutoTokenizer, AutoModelForMaskedLM, AutoConfig
+from sklearn.linear_model import LogisticRegression
 
 from dataset import load_intervention_dataset, collate_fn, get_start_ends, WORDS_IN_SENTENCE
 
@@ -124,64 +126,67 @@ class Probe(pl.LightningModule):
     def configure_optimizers(self):
         return torch.optim.Adam(self.parameters(), lr=1e-3)
 
-def train_probes(model_name:str, probe_runs:int, batch_size:int=8, epochs:int=40):
-    train, valid, _ = get_reps(model_name, batch_size=batch_size)
+def train_probes(model_name:str, probe_runs:int, batch_size:int=8, masked:bool=True):
+    train, valid, _ = get_reps(model_name, batch_size=batch_size, masked=masked)
     model_config = AutoConfig.from_pretrained(model_name)
     n_layers = model_config.num_hidden_layers + 1
+    probes_dir = 'probes' if masked else 'probes_unmasked'
 
-    for probe_run in range(probe_runs):
-        for word in range(WORDS_IN_SENTENCE):
-            word_train, word_valid = train[word], valid[word]
-            for layer in range(n_layers):
-                # create datasets / dataloaders
-                layer_train = word_train.get_layer_dataset(layer) 
-                layer_valid = word_valid.get_layer_dataset(layer)
-                train_dataloader = DataLoader(layer_train, batch_size=batch_size, collate_fn=collate_fn_reps)
-                valid_dataloader = DataLoader(layer_valid, batch_size=batch_size, collate_fn=collate_fn_reps)
+    with tqdm(total=probe_runs * WORDS_IN_SENTENCE * n_layers) as pbar:
+        for probe_run in range(probe_runs):
+            for word in range(WORDS_IN_SENTENCE):
+                word_train, word_valid = train[word], valid[word]
+                for layer in range(n_layers):
+                    # create datasets / dataloaders
+                    layer_train = word_train.get_layer_dataset(layer) 
+                    layer_valid = word_valid.get_layer_dataset(layer)
 
-                # initialize probe
-                probe = Probe(model_config.hidden_size)
-                
-                # initialize path and gpu count
-                path = Path(f'probes/{model_name}/run-{probe_run}/word-{word}/layer-{layer}')
-                path.mkdir(exist_ok=True, parents=True)
+                    # create and train probe, save weights
+                    probe = LogisticRegression(penalty='l2')
+                    probe = probe.fit(layer_train.reps.cpu().numpy(), layer_train.labels.cpu().numpy())
+                    state_dict = {'probe.weight': torch.tensor(probe.coef_),'probe.bias': torch.tensor(probe.intercept_)}
 
-                # train and save
-                trainer = pl.Trainer(accelerator=pl_accelerator, devices=n_devices, max_epochs=epochs, default_root_dir=str(path))
-                trainer.fit(probe, train_dataloader, valid_dataloader)
-                torch.save(probe.state_dict(), path/'state_dict.pt')
+                    path = Path(f'{probes_dir}/{model_name}/run-{probe_run}/word-{word}/layer-{layer}')
+                    path.mkdir(exist_ok=True, parents=True)
+
+                    torch.save(state_dict, path/'state_dict.pt')
+
+                    pbar.update(1)
 
 
-def load_probe_params(model_name:str, probe_run:int, device:str='cpu'):
+def load_probe_params(model_name:str, probe_run:int, device:str='cpu', masked:bool=True):
     """
     For a given model_name and probe run, loads the associated probes.
     """
     model_config = AutoConfig.from_pretrained(model_name)
     n_layers = model_config.num_hidden_layers + 1
+    probes_dir = 'probes' if masked else 'probes_unmasked'
 
     # the first model_config.hidden_size entries of the last dim are the weight
     # the last entry, at index model_config.hidden_size, is the bias
     probe_params = torch.zeros([WORDS_IN_SENTENCE, n_layers, model_config.hidden_size + 1])
     for word in range(WORDS_IN_SENTENCE):
         for layer in range(n_layers):
-            path = Path(f'probes/{model_name}/run-{probe_run}/word-{word}/layer-{layer}/state_dict.pt')
+            path = Path(f'{probes_dir}/{model_name}/run-{probe_run}/word-{word}/layer-{layer}/state_dict.pt')
             state_dict = torch.load(path)
             probe_params[word, layer, :model_config.hidden_size] = state_dict['probe.weight']
             probe_params[word, layer, model_config.hidden_size] = state_dict['probe.bias']
     return probe_params.to(device)
 
 
-def probe_check(model_name:str, probe_runs:int):
+def probe_check(model_name:str, probe_runs:int, masked:bool=True):
     """
     Checks: for a given model_name and number of probe runs,
     are there at least that many probes trained?
     """
     model_config = AutoConfig.from_pretrained(model_name)
     n_layers = model_config.num_hidden_layers + 1
+    probes_dir = 'probes' if masked else 'probes_unmasked'
+
     for probe_run in range(probe_runs):
         for word in range(WORDS_IN_SENTENCE):
             for layer in range(n_layers):
-                path = Path(f'probes/{model_name}/run-{probe_run}/word-{word}/layer-{layer}/state_dict.pt')
+                path = Path(f'{probes_dir}/{model_name}/run-{probe_run}/word-{word}/layer-{layer}/state_dict.pt')
                 if not path.exists():
                     return False
     return True

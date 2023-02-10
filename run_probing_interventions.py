@@ -17,8 +17,8 @@ parser = argparse.ArgumentParser()
 parser.add_argument('--model_name', type=str, default='distilroberta-base')
 parser.add_argument('--batch_size', type=int, default=8)
 parser.add_argument('--probe_runs', type=int, default=10)
-parser.add_argument('--epochs', type=int, default=40)
 args = parser.parse_args()
+
 
 supported_models = {'bert-base-cased', 'bert-large-cased', 'roberta-base', 'roberta-large', 'distilbert-base-cased', 'distilroberta-base'}
 assert args.model_name in supported_models, f'Requested model {args.model_name} is not in the set of supported models: {supported_models}.'
@@ -65,52 +65,52 @@ def interchange_intervention_hook(module, input,
         output[i, s:e, :] = cache[i, a_s:a_e, :]
     return output if layer == 0 else (output,)
 
-if True:
-    # Perform the interchange intervention experiments only
-    # The last dim stores the sum of prob assigned to verbs that agree [0] and disagree [1]
-    interchange_results = torch.zeros([len(dataset), WORDS_TO_INTERVENE, n_layers, 2])
-    batch_start = 0
-    for batch in tqdm(dataloader):
-        batch_len = len(batch[0])  # len(batch) is 3, since it's a 3-tuple. could be < args.batch_size
-        batch_end = batch_start + batch_len
-        sentences, alternate_sentences, labels = batch
 
-        tokens = tokenizer(sentences, return_tensors='pt', padding='longest').to(device)
-        alternate_tokens = tokenizer(alternate_sentences, return_tensors='pt', padding='longest').to(device)
-        alternate_hidden_states = model(**alternate_tokens, output_hidden_states=True)['hidden_states']
-        start_ends = get_start_ends(tokens)
-        alternate_start_ends = get_start_ends(alternate_tokens)
+# Perform the interchange intervention experiments only
+# The last dim stores the sum of prob assigned to verbs that agree [0] and disagree [1]
+interchange_results = torch.zeros([len(dataset), WORDS_TO_INTERVENE, n_layers, 2])
+batch_start = 0
+for batch in tqdm(dataloader):
+    batch_len = len(batch[0])  # len(batch) is 3, since it's a 3-tuple. could be < args.batch_size
+    batch_end = batch_start + batch_len
+    sentences, alternate_sentences, labels = batch
 
-        for word in range(WORDS_TO_INTERVENE):
-            for layer in range(n_layers):
-                temp_hook_fn = partial(interchange_intervention_hook, 
-                                    cache=alternate_hidden_states[layer], 
-                                    idxs=start_ends[:, word], 
-                                    alternate_idxs=alternate_start_ends[:, word],
-                                    layer=layer)
+    tokens = tokenizer(sentences, return_tensors='pt', padding='longest').to(device)
+    alternate_tokens = tokenizer(alternate_sentences, return_tensors='pt', padding='longest').to(device)
+    alternate_hidden_states = model(**alternate_tokens, output_hidden_states=True)['hidden_states']
+    start_ends = get_start_ends(tokens)
+    alternate_start_ends = get_start_ends(alternate_tokens)
 
-                # run the model and get only those logits corresponding to the masked verb
-                interchange_logits = run_with_hook(model, tokens, layer, temp_hook_fn)[torch.arange(batch_len), start_ends[:, VERB, 0]].cpu()
-                interchange_probs = F.softmax(interchange_logits, dim=-1)
+    for word in range(WORDS_TO_INTERVENE):
+        for layer in range(n_layers):
+            temp_hook_fn = partial(interchange_intervention_hook, 
+                                cache=alternate_hidden_states[layer], 
+                                idxs=start_ends[:, word], 
+                                alternate_idxs=alternate_start_ends[:, word],
+                                layer=layer)
 
-                # j[0] is singular probability, j[1] is plural
-                probs_by_number = torch.einsum('bi,ij->bj', interchange_probs, word_number_mapping)
-                correct_indices = torch.stack([labels, 1-labels], dim=1)
-                # j[0] is agree probability, j[1] is disagree
-                probs_by_correctness = torch.gather(probs_by_number[:,:2], -1, correct_indices)
-                interchange_results[batch_start:batch_end, word, layer] = probs_by_correctness
-                torch.cuda.empty_cache()
+            # run the model and get only those logits corresponding to the masked verb
+            interchange_logits = run_with_hook(model, tokens, layer, temp_hook_fn)[torch.arange(batch_len), start_ends[:, VERB, 0]].cpu()
+            interchange_probs = F.softmax(interchange_logits, dim=-1)
 
-        batch_start = batch_end
+            # j[0] is singular probability, j[1] is plural
+            probs_by_number = torch.einsum('bi,ij->bj', interchange_probs, word_number_mapping)
+            correct_indices = torch.stack([labels, 1-labels], dim=1)
+            # j[0] is agree probability, j[1] is disagree
+            probs_by_correctness = torch.gather(probs_by_number[:,:2], -1, correct_indices)
+            interchange_results[batch_start:batch_end, word, layer] = probs_by_correctness
+            torch.cuda.empty_cache()
 
-    results_path = Path(f'results/{args.model_name}')
-    results_path.mkdir(exist_ok=True, parents=True)
-    torch.save(interchange_results, results_path/'interchange.pt')
+    batch_start = batch_end
+
+results_path = Path(f'results/{args.model_name}')
+results_path.mkdir(exist_ok=True, parents=True)
+torch.save(interchange_results, results_path/'interchange.pt')
 
 # Perform the reflection intervention experiments only 
 if not probe_check(args.model_name, args.probe_runs):
     print("Probes must be trained prior to reflection experiments. Training new probes.")
-    train_probes(args.model_name, args.probe_runs, epochs=args.epochs)
+    train_probes(args.model_name, args.probe_runs)
 
 
 def reflection_intervention_hook(module, input,

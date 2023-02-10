@@ -8,11 +8,11 @@ import seaborn as sns
 import matplotlib.pyplot as plt
 
 parser = argparse.ArgumentParser()
-parser.add_argument('--model_name', type=str, default='bert-base-cased')
+parser.add_argument('--model_name', type=str, default='roberta-large')
 args = parser.parse_args()
 
 FONTSIZE=15
-WORDS = ['ART1', 'ADJ', 'SUBJ', 'ADV', 'VERB', 'ART2', 'OBJ']
+WORDS = ['ART1', 'ADJ', 'SUBJ', 'ADV', '[MASK]', 'ART2', 'OBJ']
 
 def make_heatmap(p_error: np.array, intervention:str):
     _, n_layers = p_error.shape
@@ -37,13 +37,15 @@ def make_heatmap(p_error: np.array, intervention:str):
     plt.savefig(savefile/f'{intervention}.png')
     plt.close()
 
-def make_mdl_graph(mdl: np.array, legend_below:bool=True):
+def make_mdl_graph(mdl: np.array, mdl_unmasked: np.array, legend_below:bool=True):
     plt.style.use('seaborn-darkgrid')
     plt.figure()
 
     _, n_layers = mdl.shape
     d = {word: np.minimum(mdl[i], 4000) for i, word in enumerate(WORDS)}
-    d['layer'] = list(range(n_layers)) 
+    d['VERB'] = np.minimum(mdl_unmasked[WORDS.index('[MASK]')], 4000)
+    labels = ['embs'] + list(range(n_layers-1))
+    d['layer'] = labels
     df = pd.DataFrame.from_dict(d)
     df = df.set_index('layer')
 
@@ -70,12 +72,13 @@ def make_mdl_graph(mdl: np.array, legend_below:bool=True):
     fig.savefig(savefile/'mdl.png')
     plt.close()
 
-def make_vinfo_graph(accuracy:np.array, vinfo: np.array, legend_below:bool=True):
+def make_vinfo_graph(accuracy:np.array, vinfo: np.array, accuracy_unmasked:np.array, vinfo_unmasked:np.array, legend_below:bool=True):
     plt.style.use('seaborn-darkgrid')
     plt.figure()
 
     _, n_layers = accuracy.shape
     accs = {word:accuracy[i] for i, word in enumerate(WORDS)}
+    accs['VERB'] = accuracy_unmasked[WORDS.index('[MASK]')]
     labels = ['embs'] + list(range(n_layers-1))
     accs['layer'] = labels
     df = pd.DataFrame.from_dict(accs)
@@ -88,6 +91,7 @@ def make_vinfo_graph(accuracy:np.array, vinfo: np.array, legend_below:bool=True)
     ax.set_ylabel('Accuracy', fontsize=FONTSIZE)
 
     vinfos = {word:vinfo[i] for i, word in enumerate(WORDS)}
+    vinfos['VERB'] = vinfo_unmasked[WORDS.index('[MASK]')]
     df_v = pd.DataFrame.from_dict(vinfos)
 
     ax2 = ax.twinx()
@@ -115,7 +119,6 @@ def make_vinfo_graph(accuracy:np.array, vinfo: np.array, legend_below:bool=True)
 
 
 # -------------------------- MAIN BODY STARTS HERE -------------------------- #
-
 results_path = Path(f'results/{args.model_name}')
 
 if (results_path/'interchange.pt').exists():
@@ -127,6 +130,7 @@ if (results_path/'interchange.pt').exists():
     make_heatmap(mean_disagreement, 'interchange')
 else:
     print("Couldn't find interchange data")
+
 
 if (results_path/'reflection.pt').exists():
     # probe_runs, len(dataset), WORDS_TO_INTERVENE, n_layers, correctness (2)
@@ -145,7 +149,9 @@ if (results_path/'description_length.pt').exists():
     mdl = torch.load(results_path/'description_length.pt').numpy()
     mean_mdl = mdl.mean(0)
     std_mdl = mdl.std(0)
-    make_mdl_graph(mean_mdl)
+    mdl_unmasked = torch.load(results_path/'description_length_unmasked.pt').numpy()
+    mean_mdl_unmasked = mdl_unmasked.mean(0)
+    make_mdl_graph(mean_mdl, mean_mdl_unmasked)
 else:
     print("Couldn't find MDL data.")
 
@@ -153,6 +159,9 @@ if (results_path/'accuracy.pt').exists() and (results_path/'v_info.pt').exists()
     # splits (3) x probe_runs x WORDS_IN_SENTENCE x n_layers
     accuracy = torch.load(results_path/'accuracy.pt').numpy()
     vinfo = torch.load(results_path/'v_info.pt').numpy()
+
+    accuracy_unmasked = torch.load(results_path/'accuracy_unmasked.pt').numpy()
+    vinfo_unmasked = torch.load(results_path/'v_info_unmasked.pt').numpy()
 
     train_accuracy, _, _ = accuracy 
     mean_train_accuracy = train_accuracy.mean(0)
@@ -162,6 +171,6 @@ if (results_path/'accuracy.pt').exists() and (results_path/'v_info.pt').exists()
     mean_train_vinfo = train_vinfo.mean(0)
     std_train_vinfo = train_vinfo.std(0)
 
-    make_vinfo_graph(mean_train_accuracy, mean_train_vinfo)
+    make_vinfo_graph(mean_train_accuracy, mean_train_vinfo, accuracy_unmasked[0].mean(0), vinfo_unmasked[0].mean(0))
 else:
     print("Couldn't find accuracy / V-info data")
